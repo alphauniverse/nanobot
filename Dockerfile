@@ -1,24 +1,28 @@
 # =============================================================================
 # nanobot Dockerfile (Modified — referencing QwenPaw template)
 # Base: Ubuntu 26.04 (Resolute Raccoon) + Python 3.13 + uv
+# Source: cloned from GitHub during build (no local source files needed)
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build console/frontend (if applicable)
+# Build arguments for remote source
 # ---------------------------------------------------------------------------
-FROM node:24-slim AS frontend-builder
-WORKDIR /build
-# Placeholder: copy frontend source and build if nanobot adds a web console
-# COPY webui/ ./webui/
-# RUN cd webui && npm ci && npm run build
+# Usage:
+#   docker build -t nanobot:latest .
+#   docker build --build-arg NANOBOT_VERSION=v0.2.1 -t nanobot:v0.2.1 .
+#   docker build --build-arg NANOBOT_REPO=https://github.com/your-fork/nanobot.git -t nanobot:custom .
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Stage 2: Runtime image
-# ---------------------------------------------------------------------------
 FROM ubuntu:26.04
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
+
+# ---------------------------------------------------------------------------
+# Build args: remote repo URL and version
+# ---------------------------------------------------------------------------
+ARG NANOBOT_REPO=https://github.com/HKUDS/nanobot.git
+ARG NANOBOT_VERSION=main
 
 # ---------------------------------------------------------------------------
 # 1. System base packages + commonly used open-source tools
@@ -112,7 +116,7 @@ RUN curl -fsSL https://get.pnpm.io/install.sh | env PNPM_HOME=/usr/local/pnpm SH
 ENV PNPM_HOME=/usr/local/pnpm
 
 # ---------------------------------------------------------------------------
-# 5. Install Chromium + Playwright dependencies (optional, for web automation)
+# 5. Install Chromium + Playwright dependencies (for web automation)
 # ---------------------------------------------------------------------------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -160,7 +164,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# 7. Application setup
+# 7. Clone nanobot source from GitHub and install
 # ---------------------------------------------------------------------------
 WORKDIR /app
 
@@ -170,27 +174,46 @@ ENV NANOBOT_WORKING_DIR=/app/working
 ENV NANOBOT_SECRET_DIR=/app/working.secret
 ENV NANOBOT_BACKUP_DIR=/app/working.backups
 
-# Install Python dependencies first (cached layer)
-# Hatch reads the custom build hook from hatch_build.py even for metadata-only install.
-COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md hatch_build.py ./
-RUN mkdir -p nanobot bridge && touch nanobot/__init__.py && \
-    uv pip install --no-cache . && \
-    rm -rf nanobot bridge
-
-# Copy the full source and install
-COPY nanobot/ nanobot/
-COPY bridge/ bridge/
-COPY webui/ webui/
-RUN NANOBOT_FORCE_WEBUI_BUILD=1 uv pip install --no-cache .
-
-# ---------------------------------------------------------------------------
-# 8. Build the WhatsApp bridge (using pnpm)
-# ---------------------------------------------------------------------------
-WORKDIR /app/bridge
+# Force all GitHub connections over HTTPS (no SSH required)
 RUN git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/ && \
-    git config --global --add url."https://github.com/".insteadOf git@github.com: && \
-    pnpm install --frozen-lockfile && pnpm run build
-WORKDIR /app
+    git config --global --add url."https://github.com/".insteadOf git@github.com:
+
+# Clone the repository at the specified version
+RUN git clone --depth 1 --branch ${NANOBOT_VERSION} ${NANOBOT_REPO} /app/src && \
+    # Move source files into place \
+    cp /app/src/pyproject.toml /app/ 2>/dev/null || true && \
+    cp /app/src/README.md /app/ 2>/dev/null || touch /app/README.md && \
+    cp /app/src/LICENSE /app/ 2>/dev/null || touch /app/LICENSE && \
+    cp /app/src/THIRD_PARTY_NOTICES.md /app/ 2>/dev/null || true && \
+    cp /app/src/hatch_build.py /app/ 2>/dev/null || true && \
+    # Move nanobot source \
+    if [ -d /app/src/nanobot ]; then cp -r /app/src/nanobot /app/; else mkdir -p /app/nanobot && touch /app/nanobot/__init__.py; fi && \
+    # Move bridge source \
+    if [ -d /app/src/bridge ]; then cp -r /app/src/bridge /app/; else mkdir -p /app/bridge; fi && \
+    # Move webui source (optional) \
+    if [ -d /app/src/webui ] && [ "$(ls -A /app/src/webui 2>/dev/null)" ]; then \
+      cp -r /app/src/webui /app/; \
+    else \
+      mkdir -p /app/webui; \
+    fi && \
+    # Remove cloned source to reduce image size \
+    rm -rf /app/src
+
+# Install Python package
+RUN NANOBOT_FORCE_WEBUI_BUILD=1 uv pip install --no-cache /app
+
+# ---------------------------------------------------------------------------
+# 8. Build the WhatsApp bridge (using pnpm, only if package.json exists)
+# ---------------------------------------------------------------------------
+RUN set -e; \
+    if [ -f /app/bridge/package.json ]; then \
+      cd /app/bridge && \
+      pnpm install --frozen-lockfile 2>/dev/null || pnpm install && \
+      pnpm run build && \
+      echo "Bridge built successfully"; \
+    else \
+      echo "No bridge/package.json found, skipping bridge build"; \
+    fi
 
 # ---------------------------------------------------------------------------
 # 9. Create non-root user and config directory
