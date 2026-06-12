@@ -1,0 +1,39 @@
+# =============================================================================
+# Nanobot Docker Compose
+# =============================================================================
+# Usage:
+#   Start nanobot:       docker compose run --rm nanobot
+#   Interactive shell:   docker compose run --rm nanobot bash
+#   Build image:         docker compose build
+#   Custom command:      docker compose run --rm nanobot <command>
+# =============================================================================
+
+services:
+  nanobot:
+    image: ${DOCKERHUB_USERNAME:-your-username}/nanobot:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nanobot
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    volumes:
+      # Mount project workspace for persistent data
+      - ./workspace:/workspace
+      # Persist pnpm store across container restarts
+      - pnpm-store:/root/.local/share/pnpm/store
+      # Persist uv cache across container restarts
+      - uv-cache:/root/.cache/uv
+    environment:
+      - LANG=en_US.UTF-8
+      - LC_ALL=en_US.UTF-8
+      - PNPM_HOME=/root/.local/share/pnpm
+      - UV_HOME=/root/.local/bin
+      - UV_PYTHON_PREFERENCE=only-managed
+
+volumes:
+  pnpm-store:
+    driver: local
+  uv-cache:
+    driver: local

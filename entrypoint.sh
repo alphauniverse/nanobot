@@ -1,76 +1,40 @@
-#!/bin/sh
-# =============================================================================
-# nanobot Docker Entrypoint
-# Referencing QwenPaw's initialization pattern, keeping nanobot's lightweight
-# single-process (exec) design.
-# =============================================================================
+#!/bin/bash
 set -e
 
-# ---------------------------------------------------------------------------
-# 1. Directory permission check (from original nanobot)
-# ---------------------------------------------------------------------------
-dir="$HOME/.nanobot"
-if [ -d "$dir" ] && [ ! -w "$dir" ]; then
-    owner_uid=$(stat -c %u "$dir" 2>/dev/null || stat -f %u "$dir" 2>/dev/null)
-    cat >&2 <<EOF
-Error: $dir is not writable (owned by UID $owner_uid, running as UID $(id -u)).
+# =============================================================================
+# Nanobot Container Entrypoint
+# =============================================================================
+# This script ensures all tool paths are properly loaded before executing
+# the user's command. It supports three usage patterns:
+#
+#   1. docker run <image>                     → starts nanobot (default CMD)
+#   2. docker run -it <image> bash            → opens interactive shell
+#   3. docker run <image> <any-command>       → runs arbitrary command
+# =============================================================================
 
-Fix (pick one):
-  Host:   sudo chown -R 1000:1000 ~/.nanobot
-  Docker: docker run --user \$(id -u):\$(id -g) ...
-  Podman: podman run --userns=keep-id ...
-EOF
-    exit 1
+# --- Ensure pnpm path is available ---
+export PNPM_HOME="${PNPM_HOME:-/root/.local/share/pnpm}"
+export PATH="${PNPM_HOME}:${PATH}"
+
+# --- Ensure uv and uv-managed tools path is available ---
+export UV_HOME="${UV_HOME:-/root/.local/bin}"
+export PATH="${UV_HOME}:${PATH}"
+
+# --- Ensure uv-managed Python is preferred ---
+export UV_PYTHON_PREFERENCE="only-managed"
+
+# --- Print environment info when running interactively ---
+if [ -t 0 ]; then
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║  Nanobot Docker Environment                             ║"
+    echo "╠══════════════════════════════════════════════════════════╣"
+    echo "║  Node.js : $(node --version 2>/dev/null || echo 'N/A')                                   ║"
+    echo "║  pnpm    : $(pnpm --version 2>/dev/null || echo 'N/A')                                   ║"
+    echo "║  Python  : $(python3 --version 2>/dev/null || echo 'N/A')                                   ║"
+    echo "║  uv      : $(uv --version 2>/dev/null || echo 'N/A')                                   ║"
+    echo "║  nanobot : $(nanobot --version 2>/dev/null || echo 'N/A')                                   ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
 fi
 
-# ---------------------------------------------------------------------------
-# 2. Auto-initialize if config is missing (referencing QwenPaw)
-# ---------------------------------------------------------------------------
-if [ ! -f "${NANOBOT_WORKING_DIR:-/app/working}/config.json" ] && \
-   [ ! -f "$HOME/.nanobot/config.json" ]; then
-    echo "No config.json found, running first-time initialization..."
-    nanobot init --defaults --accept-security 2>/dev/null || true
-    echo "Initialization complete."
-else
-    echo "Config found, skipping initialization."
-fi
-
-# ---------------------------------------------------------------------------
-# 3. Security warning when running without auth in container
-#    (referencing QwenPaw's warn_if_auth_off_container_bind)
-# ---------------------------------------------------------------------------
-is_auth_enabled() {
-    flag="${NANOBOT_AUTH_ENABLED:-}"
-    flag="$(printf '%s' "$flag" | tr '[:upper:]' '[:lower:]')"
-    [ "$flag" = "true" ] || [ "$flag" = "1" ] || [ "$flag" = "yes" ]
-}
-
-if ! is_auth_enabled; then
-    cat >&2 <<'EOF'
-============================================================
-SECURITY NOTICE: nanobot is running without authentication.
-
-Anyone who can reach the service may access nanobot APIs without login.
-
-Recommended:
-  - Restrict access to a trusted network or protected environment.
-  - Enable authentication with NANOBOT_AUTH_ENABLED=true
-============================================================
-EOF
-fi
-
-# ---------------------------------------------------------------------------
-# 4. Environment info (helpful for debugging)
-# ---------------------------------------------------------------------------
-echo "nanobot starting..."
-echo "  Python:  $(python3 --version 2>&1)"
-echo "  Node.js: $(node --version 2>&1)"
-echo "  pnpm:    $(pnpm --version 2>&1)"
-echo "  uv:      $(uv --version 2>&1)"
-echo "  User:    $(whoami) (UID $(id -u))"
-echo "  Home:    $HOME"
-
-# ---------------------------------------------------------------------------
-# 5. Start nanobot as PID 1 (exec ensures proper signal handling)
-# ---------------------------------------------------------------------------
-exec nanobot "$@"
+# --- Execute the command ---
+exec "$@"
