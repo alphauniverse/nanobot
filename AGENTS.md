@@ -34,7 +34,7 @@ docker compose run --rm nanobot <command>
 2. pnpm（官方脚本，`PNPM_HOME=/root/.local/share/pnpm`）
 3. uv（官方脚本，`UV_HOME=/root/.local/bin`）
 4. Python 3.13（`uv python install`，软链到 `/usr/local/bin/python3` 作为系统默认 Python）
-5. `nanobot-ai`（`uv tool install`，提供 `nanobot` 命令）
+5. `nanobot-ai`（`uv tool install`，提供 `nanobot` 命令）；`NANOBOT_VERSION` build arg 非空时钉住该版本（同步工作流传入），留空装 PyPI 最新版——注意 ARG 声明位置在安装命令之前，不要移到其他层
 
 **修改安装步骤时注意层级依赖**：pnpm/uv 的 PATH 依赖各自的 `*_HOME` 环境变量；Python 依赖 uv；nanobot 依赖 uv 管理的 Python。调整顺序会破坏后续层。
 
@@ -48,12 +48,22 @@ docker compose run --rm nanobot <command>
 - `pnpm-store`、`uv-cache` 命名卷：跨容器重建缓存依赖
 - `image` 字段引用 `${DOCKERHUB_USERNAME:-your-username}/nanobot:${IMAGE_TAG:-latest}`，与 CI 推送的镜像名一致
 
-### CI 发布流程（.github/workflows/build.yml）
+### CI 发布流程（.github/workflows/）
+
+两条流水线共用 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` secrets：
+
+**build.yml（仓库自身变更）**：
 
 - 触发：push 到 `main` → `latest`；严格 semver tag（`v1.2.3` 格式）→ `1.2.3`/`1.2`/`1`；PR（仅构建相关文件变更）→ 只构建验证不推送；手动 dispatch
 - **paths filter 只放在 `pull_request` 上**：`push` 事件的 `paths` 与 `tags` 是 AND 语义，若同时配置会导致 tag 发布不可靠，修改触发条件时不要把它们合回同一 `push` 块
-- 多架构构建：`linux/amd64,linux/arm64`（QEMU + Buildx），GHA 层缓存；`concurrency` 会自动取消同分支/tag 的旧构建
-- 依赖 secrets：`DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`
+
+**sync-upstream.yml（上游版本同步）**：
+
+- 每日定时轮询官方仓库 `HKUDS/nanobot` 的 GitHub Release（与 PyPI `nanobot-ai` 版本一致），通过 Docker Hub tag 存在性检查去重，新版本才构建
+- tag 归一化：`v0.1.4.post3` → `0.1.4-post3`（点转连字符），因 post 后缀无法被 metadata-action 的 semver 解析，`is_post` 输出控制 raw tag 启用
+- `flavor: latest=true` 使每次上游同步都更新 `latest`；若需重建已发布版本（如 Dockerfile 变更后），用手动 dispatch 的 `force` 输入
+
+公共约定：多架构构建 `linux/amd64,linux/arm64`（QEMU + Buildx），GHA 层缓存；`concurrency` 自动取消同分支/tag 的旧构建
 
 ## 修改约定
 

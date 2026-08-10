@@ -45,12 +45,19 @@ docker compose run --rm nanobot <command>
 
 ## 发布流程
 
-GitHub Actions（`.github/workflows/build.yml`）自动构建多架构镜像并推送到 Docker Hub：
+GitHub Actions 自动构建多架构镜像并推送到 Docker Hub（需配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` secrets）：
 
-- push 到 `main` → 发布 `latest`
+**仓库自身变更**（`.github/workflows/build.yml`）：
+
+- push 到 `main` → 发布 `latest`（安装 PyPI 最新版 nanobot-ai）
 - 推送严格 semver tag（如 `v1.2.3`）→ 发布 `1.2.3` / `1.2` / `1`
 - Pull Request（涉及构建相关文件）→ 仅构建验证，不推送
-- 需要在仓库中配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` secrets
+
+**上游版本同步**（`.github/workflows/sync-upstream.yml`）：
+
+- 每日定时轮询官方仓库 [HKUDS/nanobot](https://github.com/HKUDS/nanobot) 的最新 Release，发现新版本后自动构建发布并同步 `latest`，也可手动触发（支持强制重建）
+- 镜像内通过 `NANOBOT_VERSION` build arg 钉住对应的 `nanobot-ai` PyPI 版本
+- 镜像 tag 规则：正常版本 → `0.1.5` / `0.1` / `0`；post 版本 → 归一化 tag（`v0.1.4.post3` → `0.1.4-post3`）
 
 ## 项目结构
 
@@ -59,4 +66,5 @@ GitHub Actions（`.github/workflows/build.yml`）自动构建多架构镜像并�
 | `Dockerfile` | 镜像定义，编号分层的安装步骤 |
 | `docker-compose.yml` | 运行配置：挂载、环境变量、缓存卷 |
 | `entrypoint.sh` | 容器入口：补全 PATH 后执行用户命令 |
-| `.github/workflows/build.yml` | CI 构建与发布流水线 |
+| `.github/workflows/build.yml` | CI：仓库自身变更的构建与发布 |
+| `.github/workflows/sync-upstream.yml` | CI：与上游 HKUDS/nanobot Release 定时同步 |

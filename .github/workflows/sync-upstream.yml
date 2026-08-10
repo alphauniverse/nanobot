@@ -1,0 +1,149 @@
+# =============================================================================
+# GitHub Actions: Sync with Upstream nanobot Releases
+# =============================================================================
+# 上游官方仓库：HKUDS/nanobot（PyPI 包名 nanobot-ai），release tag 形如
+# v0.1.5 / v0.1.4.post3，与 PyPI 版本一致。
+#
+# 工作流程：
+#   1. 每日定时（或手动触发）查询上游最新 release
+#   2. 归一化 tag：去掉 v 前缀，点替换为连字符（0.1.4.post3 → 0.1.4-post3）
+#   3. 查询 Docker Hub 是否已存在该 tag，已存在则跳过
+#   4. 新版本则构建并推送：正常 semver → <version>/<major.minor>/<major>；
+#      post 版本 → 归一化 tag；两者均更新 latest
+#
+# Required Secrets:
+#   - DOCKERHUB_USERNAME : Docker Hub username
+#   - DOCKERHUB_TOKEN    : Docker Hub access token
+# =============================================================================
+
+name: Sync Upstream nanobot Release
+
+on:
+  schedule:
+    # 每天 UTC 06:00（北京时间 14:00）检查上游新版本
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "即使 Docker Hub 已有该版本 tag 也强制重新构建"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: nanobot
+  UPSTREAM_REPO: HKUDS/nanobot
+
+jobs:
+  check-upstream:
+    name: Check upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      version: ${{ steps.check.outputs.version }}
+      docker_tag: ${{ steps.check.outputs.docker_tag }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      is_post: ${{ steps.check.outputs.is_post }}
+    steps:
+      - name: Compare upstream release with published tags
+        id: check
+        run: |
+          # 1. 查询上游最新 release tag（如 v0.1.4.post3）
+          UPSTREAM_TAG=$(curl -fsSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" | jq -r '.tag_name')
+          if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
+            echo "::error::Failed to fetch latest release from ${{ env.UPSTREAM_REPO }}"
+            exit 1
+          fi
+          echo "upstream_tag=${UPSTREAM_TAG}" >> "$GITHUB_OUTPUT"
+
+          # 2. 归一化为合法 Docker tag：v0.1.4.post3 → 0.1.4-post3
+          VERSION="${UPSTREAM_TAG#v}"
+          DOCKER_TAG="${VERSION//./-}"
+          echo "Upstream latest: ${UPSTREAM_TAG} → image tag: ${DOCKER_TAG}"
+
+          # 3. 查询 Docker Hub 是否已发布该 tag
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}/tags/${DOCKER_TAG}")
+          if [ "$HTTP_CODE" = "200" ] && [ "${{ inputs.force || false }}" != "true" ]; then
+            echo "Tag ${DOCKER_TAG} already published, skipping build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "docker_tag=${DOCKER_TAG}" >> "$GITHUB_OUTPUT"
+            # post 版本（如 0.1.4.post3）无法被 semver 解析，需走归一化 tag
+            if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\..+$ ]]; then
+              echo "is_post=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "is_post=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  build-and-push:
+    name: Build & push upstream version
+    needs: check-upstream
+    if: needs.check-upstream.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 正常 semver 版本：0.1.5 → 0.1.5 / 0.1 / 0（post 版本的 value 无法被 semver
+      # 解析，这三行自动跳过）；post 版本：用归一化 tag（0.1.4-post3）。
+      # flavor latest=true 使每次发布都同步更新 latest。
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=true
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.check-upstream.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.check-upstream.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.check-upstream.outputs.version }}
+            type=raw,value=${{ needs.check-upstream.outputs.docker_tag }},enable=${{ needs.check-upstream.outputs.is_post }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NANOBOT_VERSION=${{ needs.check-upstream.outputs.version }}
+
+      - name: Sync summary
+        run: |
+          echo "### :arrows_counterclockwise: Upstream Sync Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Upstream release:** [${{ needs.check-upstream.outputs.upstream_tag }}](https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/${{ needs.check-upstream.outputs.upstream_tag }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

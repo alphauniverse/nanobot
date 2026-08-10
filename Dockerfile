@@ -64,7 +64,10 @@ RUN uv python install 3.13 && \
 # ---------------------------------------------------------------------------
 # 5. Install nanobot-ai via uv tool
 # ---------------------------------------------------------------------------
-RUN uv tool install nanobot-ai && \
+# NANOBOT_VERSION 由 CI 同步工作流传入（对齐 HKUDS/nanobot 官方 release）；
+# 本地构建留空时安装 PyPI 最新版
+ARG NANOBOT_VERSION=""
+RUN uv tool install "nanobot-ai${NANOBOT_VERSION:+==${NANOBOT_VERSION}}" && \
     nanobot --version || true
 
 # ---------------------------------------------------------------------------
