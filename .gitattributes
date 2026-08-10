@@ -1,0 +1,5 @@
+# 统一使用 LF 行尾，避免 Windows 上 CRLF 破坏容器内脚本
+* text=auto eol=lf
+
+# Shell 脚本必须为 LF（entrypoint.sh 在 Linux 容器内执行）
+*.sh text eol=lf

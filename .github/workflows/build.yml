@@ -2,9 +2,13 @@
 # GitHub Actions: Build & Push Nanobot Docker Image
 # =============================================================================
 # Triggers:
-#   - Push to main (when Dockerfile/entrypoint changes)
-#   - Tag push (v* semver format)
+#   - Push to main                        → build & push :latest
+#   - Tag push (strict semver v1.2.3)     → build & push :1.2.3/:1.2/:1
+#   - Pull request (build-related changes)→ build verification only (no push)
 #   - Manual dispatch
+#
+# Note: paths filter is applied via pull_request to avoid the AND semantics
+# of paths+tags on push events, which would make tag releases unreliable.
 #
 # Required Secrets:
 #   - DOCKERHUB_USERNAME : Docker Hub username
@@ -17,13 +21,21 @@ on:
   push:
     branches:
       - main
+    tags:
+      # 严格 semver：v1.2.3 / v1.2.3-beta.1，拒绝 v1、vX.Y 等模糊 tag
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  pull_request:
     paths:
       - "Dockerfile"
       - "entrypoint.sh"
+      - "docker-compose.yml"
       - ".github/workflows/build.yml"
-    tags:
-      - "v*"
   workflow_dispatch:
+
+# 同一分支/tag 的新提交自动取消旧的构建，避免资源浪费
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   IMAGE_NAME: nanobot
@@ -72,16 +84,12 @@ jobs:
         with:
           images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
           tags: |
-            # main branch → latest
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            # main 分支 → latest
+            type=raw,value=latest,enable={{is_default_branch}}
             # semver tags: v1.2.3 → 1.2.3, 1.2, 1
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            # branch name tag for non-main branches
-            type=ref,event=branch,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
-            # PR number tag
-            type=ref,event=pr
 
       # --------------------------------------------------
       # 6. Build and push multi-arch image
